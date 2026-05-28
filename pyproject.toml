@@ -1,0 +1,12 @@
+[project]
+name = "decode-series"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.14",
+    "eth-abi>=5.2.0",
+    "pyspark>=4.1.2",
+    "web3>=7.16.0",
+]
