@@ -28,7 +28,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import MapType, StringType
 
-# ── project modules ───────────────────────────────────────────────
+#  project modules 
 from aave_abis import CONTRACT_REGISTRY, DECODER_MAP
 from aave_decoder import decode_log
 
@@ -46,32 +46,18 @@ S3_REGION   = "us-east-2"
 # Sink — S3
 S3_OUTPUT   = "s3a://money-market/aave/decoded" 
 
-# Sink — PostgreSQL
-PG_URL      = "jdbc:postgresql://localhost:5432/blockchain"
-PG_USER     = "your_user"
-PG_PASSWORD = "your_password"
-PG_SCHEMA   = "aave"
-
 # All Aave contract addresses (lowercase) — used for early filter
 AAVE_CONTRACTS = set(CONTRACT_REGISTRY.keys())
 
 # All known topic0s — used for early filter
 AAVE_TOPIC0S = list({abi["topic0"] for abi in DECODER_MAP.values()})
 
-# Event → output table name
-EVENT_TABLES = {
-    "Borrow":          f"{PG_SCHEMA}.borrow_events",
-    "Repay":           f"{PG_SCHEMA}.repay_events",
-    "LiquidationCall": f"{PG_SCHEMA}.liquidation_events",
-}
-
-
 def get_spark(app_name: str,s3_raw_bucket='money-market') -> SparkSession:
     builder = (
         SparkSession.builder
         .appName(app_name)
 
-        # ── Anonymous credentials for public source bucket ─────────
+        #  Anonymous credentials for public source bucket     
         .config(
             "spark.hadoop.fs.s3a.aws.credentials.provider",
             "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider",
@@ -80,7 +66,7 @@ def get_spark(app_name: str,s3_raw_bucket='money-market') -> SparkSession:
         .config("spark.hadoop.fs.s3a.path.style.access", "false")
         .config("spark.hadoop.fs.s3a.impl",               "org.apache.hadoop.fs.s3a.S3AFileSystem")
 
-        # ── S3 performance ──────────────────────────────────────────
+        #  S3 performance 
         .config("spark.hadoop.fs.s3a.connection.maximum",           "200")
         .config("spark.hadoop.fs.s3a.fast.upload",                  "true")
         .config("spark.hadoop.fs.s3a.block.size",                   "134217728")
@@ -230,6 +216,65 @@ def decode_logs(df: DataFrame) -> DataFrame:
     )
 
 
+def shape_deposit(df: DataFrame) -> DataFrame:
+    """
+    Unified deposit schema across V1/V2/V3.
+
+    Fields that don't exist in a given version will be NULL.
+    This lets all versions land in the same table.
+
+    V1  extras : origination_fee, borrow_balance_increase, timestamp (chain)
+    V2  extras : (none beyond core)
+    V3  extras : interest_rate_mode is uint8 not uint256
+    """
+    return df.filter(F.col("decoded._event") == "Borrow").select(
+        F.col("block_number").cast("bigint"),
+        F.col("block_timestamp").cast("timestamp"),
+        F.col("transaction_hash"),
+        F.col("log_index").cast("int"),
+        F.col("decoded._version").alias("protocol_version"),
+        F.col("date"),   
+
+        F.col("decoded.reserve").alias("reserve"),
+        F.col("decoded.user").alias("user"),
+        # on_behalf_of only in V2/V3; V1 puts borrower in 'user' topic
+        F.col("decoded.onBehalfOf").alias("on_behalf_of"),
+        F.col("decoded.amount").cast("decimal(38,0)").alias("amount"),
+        F.col("decoded.referral").cast("int").alias("referral"),
+        F.col("decoded.referralCode").cast("int").alias("referral_code"), # v3
+        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
+    )
+
+
+
+def shape_withdraw(df: DataFrame) -> DataFrame:
+    """
+    Unified withdraw schema across V1/V2/V3.
+
+    Fields that don't exist in a given version will be NULL.
+    This lets all versions land in the same table.
+
+    V1  extras : origination_fee, borrow_balance_increase, timestamp (chain)
+    V2  extras : (none beyond core)
+    V3  extras : interest_rate_mode is uint8 not uint256
+    """
+    return df.filter(F.col("decoded._event") == "Borrow").select(
+        F.col("block_number").cast("bigint"),
+        F.col("block_timestamp").cast("timestamp"),
+        F.col("transaction_hash"),
+        F.col("log_index").cast("int"),
+        F.col("decoded._version").alias("protocol_version"),
+        F.col("date"),   
+
+        F.col("decoded.reserve").alias("reserve"),
+        F.col("decoded.user").alias("user"),
+        # on_behalf_of only in V2/V3; V1 puts borrower in 'user' topic
+        F.col("decoded.onBehalfOf").alias("on_behalf_of"),
+        F.col("decoded.to").cast("decimal(38,0)").alias("to"),
+        F.col("decoded.amount").cast("decimal(38,0)").alias("amount"),
+        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
+    )
+
 
 def shape_borrow(df: DataFrame) -> DataFrame:
     """
@@ -344,30 +389,6 @@ def write_s3(df: DataFrame, event_name: str) -> None:
     )
     log.info("Done writing %s to S3", event_name)
 
-def write_postgres(df: DataFrame, event_name: str) -> None:
-    """
-    Write DataFrame to PostgreSQL table.
-    """
-    table = EVENT_TABLES[event_name]
-    log.info("Writing %s → %s", event_name, table)
-
-    pg_df = df.drop("date")
-
-    (
-        pg_df.write
-        .format("jdbc")
-        .option("url",      PG_URL)
-        .option("dbtable",  table)
-        .option("user",     PG_USER)
-        .option("password", PG_PASSWORD)
-        .option("driver",   "org.postgresql.Driver")
-        .option("batchsize", "10000")
-        .option("numPartitions", "8")
-        .mode("append")
-        .save()
-    )
-    log.info("Done writing %s to PostgreSQL", event_name)
-
 
 
 def run(start_date: date, end_date: date, sink: str) -> None:
@@ -382,6 +403,9 @@ def run(start_date: date, end_date: date, sink: str) -> None:
         "Borrow":          shape_borrow,
         "Repay":           shape_repay,
         "LiquidationCall": shape_liquidation,
+        "Deposit":         shape_deposit,
+        "Withdraw":        shape_withdraw,
+
     }
 
     for event_name, shaper in event_shapers.items():
@@ -399,8 +423,6 @@ def run(start_date: date, end_date: date, sink: str) -> None:
         if sink in ("s3", "both"):
             write_s3(event_df, event_name)
 
-        # if sink in ("postgres", "both"):
-        #     write_postgres(event_df, event_name)
 
     decoded.unpersist()
     spark.stop()

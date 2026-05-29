@@ -10,19 +10,19 @@ This project focuses on Aave V1, V2, and V3 protocols, extracting and normalizin
 
 The pipeline is split into three highly decoupled modules:
 
-### 1. [`aave_abis.py`](file:///home/freeman/Decode-Series/aave_abis.py)
+### 1. [`aave_abis.py`]
 Acts as the **Registry and Schema definition layer**.
 * Stores event signatures, schemas, and `topic0` hashes for Aave V1/V2/V3 protocols.
 * Maps lowercase contract addresses to their respective event decoders to easily route log parsing.
 * Dynamically hashes signatures using `web3` (or supports pre-computed values for performance).
 
-### 2. [`aave_decoder.py`](file:///home/freeman/Decode-Series/aave_decoder.py)
+### 2. [`aave_decoder.py`]
 Implements **low-level EVM log decoding logic**.
 * Decodes indexed parameters from `topics` slots.
 * Employs the fast `eth_abi` library to decode non-indexed parameters from the log's `data` payload.
 * Exposes a unified `decode_log` function and wraps it in a broadcast-friendly PySpark UDF wrapper `make_spark_udf`.
 
-### 3. [`aave_spark_job.py`](file:///home/freeman/Decode-Series/aave_spark_job.py)
+### 3. [`aave_spark_job.py`]
 The **PySpark ETL engine**.
 * Connects to public Ethereum log parquet datasets on AWS S3 (`s3a://aws-public-blockchain/v1.0/eth/logs`).
 * Filters raw records down to specific Aave contracts and known `topic0` signatures.
@@ -38,7 +38,7 @@ This project uses [**`uv`**](https://github.com/astral-sh/uv), an extremely fast
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/Decode-Series.git
+git clone  https://Freemandaily/Blockchain-data-decoder.git
 cd Decode-Series
 ```
 
