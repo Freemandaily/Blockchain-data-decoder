@@ -7,8 +7,9 @@ from eth_abi.exceptions import DecodingError
 
 from aave_abis import DECODER_MAP as AAVE_DECODER_MAP
 from compound_abis import DECODER_MAP as COMPOUND_DECODER_MAP
+from morpho_abis import DECODER_MAP as MORPHO_DECODER_MAP
 
-DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP}
+DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP, **MORPHO_DECODER_MAP}
 
 
 log = logging.getLogger(__name__)

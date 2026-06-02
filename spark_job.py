@@ -31,10 +31,11 @@ from pyspark.sql.types import MapType, StringType
 #  project modules 
 from aave_abis import CONTRACT_REGISTRY as AAVE_REGISTRY, DECODER_MAP as AAVE_DECODER_MAP
 from compound_abis import CONTRACT_REGISTRY as COMPOUND_REGISTRY, DECODER_MAP as COMPOUND_DECODER_MAP
+from morpho_abis import CONTRACT_REGISTRY as MORPHO_REGISTRY, DECODER_MAP as MORPHO_DECODER_MAP
 from decoder import decode_log
 
-CONTRACT_REGISTRY = {**AAVE_REGISTRY, **COMPOUND_REGISTRY}
-DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP}
+CONTRACT_REGISTRY = {**AAVE_REGISTRY, **COMPOUND_REGISTRY, **MORPHO_REGISTRY}
+DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP, **MORPHO_DECODER_MAP}
 
 
 log = logging.getLogger(__name__)
@@ -300,7 +301,7 @@ def shape_borrow(df: DataFrame) -> DataFrame:
         F.col("block_timestamp").cast("timestamp"),
         F.col("transaction_hash"),
         F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded.protocol"), F.lit("aave")).alias("protocol"),
+        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),   
 
@@ -349,7 +350,7 @@ def shape_repay(df: DataFrame) -> DataFrame:
         F.col("block_timestamp").cast("timestamp"),
         F.col("transaction_hash"),
         F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded.protocol"), F.lit("aave")).alias("protocol"),
+        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),  
 

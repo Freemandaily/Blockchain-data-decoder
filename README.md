@@ -2,7 +2,7 @@
 
 A high-performance, highly extensible PySpark batch pipeline designed to read, filter, decode, and shape raw Ethereum event logs from the AWS public blockchain dataset into structured, unified DeFi event tables.
 
-This project implements a **generalized money-market decoder** that supports multiple protocols under a single unified pipeline. Currently, it integrates **Aave (V1, V2, V3)** and **Compound (V1, V2, V3)** event tracking, extracting and normalizing data for critical actions: **Deposit/Mint/Supply**, **Withdraw/Redeem**, **Borrow**, **Repay**, and **LiquidationCall/Absorb**. The architecture is explicitly decoupled to allow onboarding new EVM-based money markets (e.g., Spark, MakerDAO, Morpho) seamlessly.
+This project implements a **generalized money-market decoder** that supports multiple protocols under a single unified pipeline. Currently, it integrates **Aave (V1, V2, V3)**, **Morpho (V1)** and **Compound (V1, V2, V3)** event tracking, extracting and normalizing data for critical actions: **Deposit/Mint/Supply**, **Withdraw/Redeem**, **Borrow**, **Repay**, and **LiquidationCall/Absorb**. The architecture is explicitly decoupled to allow onboarding new EVM-based money markets (e.g., Morpho, Spark, MakerDAO) seamlessly.
 
 ---
 
