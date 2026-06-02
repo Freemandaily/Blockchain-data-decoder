@@ -1,33 +1,36 @@
-# EVM Blockchain Log Decoder (Aave Money-Market Series)
+# EVM Blockchain Log Decoder (Multi-Protocol Money-Market Series)
 
-A high-performance PySpark batch pipeline designed to read, filter, decode, and shape raw Ethereum event logs from the AWS public blockchain dataset into structured DeFi event tables.
+A high-performance, highly extensible PySpark batch pipeline designed to read, filter, decode, and shape raw Ethereum event logs from the AWS public blockchain dataset into structured, unified DeFi event tables.
 
-This project focuses on Aave V1, V2, and V3 protocols, extracting and normalizing data for critical money-market actions: **Borrow**, **Repay**, and **LiquidationCall**.
+This project implements a **generalized money-market decoder** that supports multiple protocols under a single unified pipeline. Currently, it integrates **Aave (V1, V2, V3)** and **Compound (V1, V2, V3)** event tracking, extracting and normalizing data for critical actions: **Deposit/Mint/Supply**, **Withdraw/Redeem**, **Borrow**, **Repay**, and **LiquidationCall/Absorb**. The architecture is explicitly decoupled to allow onboarding new EVM-based money markets (e.g., Spark, MakerDAO, Morpho) seamlessly.
 
 ---
 
 ## 📂 Core Architecture & Modules
 
-The pipeline is split into three highly decoupled modules:
+The pipeline is split into separate, highly decoupled modules:
 
-### 1. [`aave_abis.py`]
-Acts as the **Registry and Schema definition layer**.
-* Stores event signatures, schemas, and `topic0` hashes for Aave V1/V2/V3 protocols.
+### 1. Registry & Schema Layers (`aave_abis.py` & `compound_abis.py`)
+Acts as the **Protocol Registry and Schema definition layer**.
+* Stores event signatures, schemas, and `topic0` hashes for their respective protocols.
 * Maps lowercase contract addresses to their respective event decoders to easily route log parsing.
 * Dynamically hashes signatures using `web3` (or supports pre-computed values for performance).
+* Identifies each event definition with a `protocol` attribute (e.g., `"aave"`, `"compound"`).
 
-### 2. [`aave_decoder.py`]
+### 2. Low-Level Log Decoder (`decoder.py`)
 Implements **low-level EVM log decoding logic**.
+* Imports registries from all registered protocols and combines their registries and `DECODER_MAP` lookups into a unified registry.
 * Decodes indexed parameters from `topics` slots.
 * Employs the fast `eth_abi` library to decode non-indexed parameters from the log's `data` payload.
-* Exposes a unified `decode_log` function and wraps it in a broadcast-friendly PySpark UDF wrapper `make_spark_udf`.
+* Dynamically injects metadata (such as `_protocol`, `_version`, and `_contract`) into decoded payloads.
+* Exposes a unified `decode_log` function that functions in isolation or inside a PySpark worker environment.
 
-### 3. [`aave_spark_job.py`]
-The **PySpark ETL engine**.
+### 3. PySpark ETL Engine (`spark_job.py`)
+The **ETL engine and data shaper**.
 * Connects to public Ethereum log parquet datasets on AWS S3 (`s3a://aws-public-blockchain/v1.0/eth/logs`).
-* Filters raw records down to specific Aave contracts and known `topic0` signatures.
+* Combines the contract addresses and topic0s of all protocols into a single, broadcast-friendly PySpark filter to perform extremely fast, early filtering without shuffles.
 * Runs the decoding UDF concurrently across worker nodes.
-* Shapes and aligns disparate protocol version schemas (V1/V2/V3) into unified event schemas.
+* Shapes and aligns disparate protocol version schemas (V1/V2/V3) and protocol families (Aave vs. Compound) into unified event schemas using Spark `coalesce` expressions.
 * Outputs optimized Snappy-compressed, date-partitioned Parquet files back to S3.
 
 ---
@@ -38,7 +41,7 @@ This project uses [**`uv`**](https://github.com/astral-sh/uv), an extremely fast
 
 ### 1. Clone the Repository
 ```bash
-git clone  https://Freemandaily/Blockchain-data-decoder.git
+git clone https://github.com/Freemandaily/Blockchain-data-decoder.git
 cd Decode-Series
 ```
 
@@ -60,7 +63,7 @@ uv sync
 ### Running Locally
 To test the pipeline locally on a subset of dates:
 ```bash
-uv run python aave_spark_job.py \
+uv run python spark_job.py \
   --start-date 2024-01-01 \
   --end-date 2024-01-02 \
   --sink s3
@@ -68,6 +71,12 @@ uv run python aave_spark_job.py \
 
 > [!NOTE]
 > Make sure you have your AWS credentials (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) exported in your local terminal environment so Spark can write output results to your destination S3 bucket.
+
+### Running Smoke Tests
+To run isolated decoding test cases against mock Aave and Compound event payloads:
+```bash
+uv run python decoder.py
+```
 
 ---
 
@@ -79,8 +88,9 @@ To process massive date ranges at scale, submit the job to an AWS EMR cluster.
 Ensure all Python files and dependencies are uploaded to your EMR-accessible script bucket:
 ```bash
 aws s3 cp aave_abis.py s3://money-market/script/aave_abis.py
-aws s3 cp aave_decoder.py s3://money-market/script/aave_decoder.py
-aws s3 cp aave_spark_job.py s3://money-market/script/aave_spark_job.py
+aws s3 cp compound_abis.py s3://money-market/script/compound_abis.py
+aws s3 cp decoder.py s3://money-market/script/decoder.py
+aws s3 cp spark_job.py s3://money-market/script/spark_job.py
 aws s3 cp bootstrap.sh s3://money-market/script/bootstrap.sh
 ```
 
@@ -92,16 +102,16 @@ aws emr add-steps \
   --cluster-id j-1T10U9FY3RX2Q \
   --steps '[
     {
-      "Name": "AaveDecoderSparkJob",
+      "Name": "LendingDecoderSparkJob",
       "ActionOnFailure": "CONTINUE",
       "HadoopJarStep": {
         "Jar": "command-runner.jar",
         "Args": [
           "spark-submit",
           "--deploy-mode", "cluster",
-          "--py-files", "s3://money-market/script/aave_abis.py,s3://money-market/script/aave_decoder.py",
+          "--py-files", "s3://money-market/script/aave_abis.py,s3://money-market/script/compound_abis.py,s3://money-market/script/decoder.py",
           "--conf", "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3",
-          "s3://money-market/script/aave_spark_job.py",
+          "s3://money-market/script/spark_job.py",
           "--env", "emr",
           "--start-date", "2026-04-27",
           "--end-date", "2026-04-27"

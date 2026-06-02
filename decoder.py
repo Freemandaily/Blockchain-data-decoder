@@ -5,7 +5,11 @@ from typing import Any
 from eth_abi import decode as abi_decode
 from eth_abi.exceptions import DecodingError
 
-from aave_abis import DECODER_MAP
+from aave_abis import DECODER_MAP as AAVE_DECODER_MAP
+from compound_abis import DECODER_MAP as COMPOUND_DECODER_MAP
+
+DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP}
+
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +86,7 @@ def decode_log(row: dict) -> dict | None:
         "_event":    abi["event"],
         "_version":  abi["version"],
         "_contract": address,
+        "_protocol": abi.get("protocol", "aave"),
     }
 
     for field in abi["indexed"]:
@@ -106,6 +111,72 @@ def decode_log(row: dict) -> dict | None:
         return None
 
     return result
+
+
+if __name__ == "__main__":
+    import json
+
+    def print_test(label: str, raw_log: dict):
+        print(f"\n{'═' * 70}")
+        print(f"  TEST : {label}")
+        print(f"{'─' * 70}")
+        print(f"  contract : {raw_log['address']}")
+        for i, t in enumerate(raw_log["topics"]):
+            print(f"  topics[{i}] : {t}")
+        print(f"  data     : {raw_log['data'][:66]}{'…' if len(raw_log['data']) > 66 else ''}")
+        print(f"{'─' * 70}")
+        result = decode_log(raw_log)
+        if result is None:
+            print("  → None  (not in registry or decode failed)")
+        else:
+            print(json.dumps(result, indent=4, default=str))
+
+    # 1. Aave V2 Borrow
+    print_test("Aave V2 Borrow", {
+        "address": "0x7d2768de32b0b80b7a3454c06bdac94a69ddc7a9",
+        "topics": [
+            "0xc6a898309e823ee50bac64e45ca8adba6690e99e7841c45d754e2a38e9019d9b",
+            "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "0x0000000000000000000000008acaab8167c80cb8b3de7fa6228b889bb1130ee8",
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+        "data": (
+            "0x"
+            "0000000000000000000000008acaab8167c80cb8b3de7fa6228b889bb1130ee8"
+            "000000000000000000000000000000000000000000000000000000003b9aca00"
+            "0000000000000000000000000000000000000000000000000000000000000002"
+            "00000000000000000000000000000000000000000002ca4a2e7ce4d5c4000000"
+        ),
+    })
+
+    # 2. Compound V2 Mint
+    print_test("Compound V2 Mint", {
+        "address": "0x39aa39c021dfbae8fac545936693ac917d5e7563",
+        "topics": [
+            "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
+        ],
+        "data": (
+            "0x"
+            "0000000000000000000000008acaab8167c80cb8b3de7fa6228b889bb1130ee8"  # minter
+            "000000000000000000000000000000000000000000000000000000003b9aca00"  # mintAmount
+            "000000000000000000000000000000000000000000000000000000000000c350"  # mintTokens
+        ),
+    })
+
+    # 3. Compound V3 Supply
+    print_test("Compound V3 Supply", {
+        "address": "0xc3d688b66703497daa19211eedff47f25384cdc3",
+        "topics": [
+            "0xd1cf3d156d5f8f0d50f6c122ed609cec09d35c9b9fb3fff6ea0959134dae424e",
+            "0x0000000000000000000000008acaab8167c80cb8b3de7fa6228b889bb1130ee8",
+            "0x0000000000000000000000008acaab8167c80cb8b3de7fa6228b889bb1130ee8",
+        ],
+        "data": (
+            "0x"
+            "000000000000000000000000000000000000000000000000000000003b9aca00"  # amount
+        ),
+    })
+
 
 
 
