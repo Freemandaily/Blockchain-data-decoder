@@ -235,7 +235,8 @@ def shape_deposit(df: DataFrame) -> DataFrame:
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),   
 
-        F.coalesce(F.col("decoded.reserve"), F.col("decoded._contract")).alias("reserve"),
+        F.col("decoded._contract").alias("project_contract"),
+        F.col("decoded.reserve").alias("reserve"),
         F.coalesce(
             F.col("decoded.user"),
             F.col("decoded.minter"),
@@ -249,7 +250,8 @@ def shape_deposit(df: DataFrame) -> DataFrame:
         ).alias("on_behalf_of"),
         F.coalesce(
             F.col("decoded.amount"),
-            F.col("decoded.mint_amount")
+            F.col("decoded.mint_amount"),
+            F.col("decoded.assets")
         ).cast("decimal(38,0)").alias("amount"),
         F.col("decoded.mint_tokens").cast("decimal(38,0)").alias("mint_tokens"), # Compound V2
         F.col("decoded.referral").cast("int").alias("referral"),
@@ -271,21 +273,25 @@ def shape_withdraw(df: DataFrame) -> DataFrame:
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),   
 
-        F.coalesce(F.col("decoded.reserve"), F.col("decoded._contract")).alias("reserve"),
+        F.col("decoded._contract").alias("project_contract"),
+        F.col("decoded.reserve").alias("reserve"),
         F.coalesce(
             F.col("decoded.user"),
             F.col("decoded.redeemer"),
-            F.col("decoded.src")
+            F.col("decoded.src"),
+            F.col("decoded.caller")
         ).alias("user"),
         F.coalesce(
             F.col("decoded.to"),
             F.col("decoded.user"),
             F.col("decoded.redeemer"),
-            F.col("decoded.src")
+            F.col("decoded.src"),
+            F.col("decoded.reciever")
         ).alias("to"),
         F.coalesce(
             F.col("decoded.amount"),
-            F.col("decoded.redeem_amount")
+            F.col("decoded.redeem_amount"),
+            F.col("decoded.assets")
         ).cast("decimal(38,0)").alias("amount"),
         F.col("decoded.redeem_tokens").cast("decimal(38,0)").alias("redeem_tokens"), # Compound V2
         F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
@@ -305,10 +311,10 @@ def shape_borrow(df: DataFrame) -> DataFrame:
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),   
 
+        F.col("decoded._contract").alias("project_contract"),
         F.coalesce(
             F.col("decoded.reserve"),
-            F.col("decoded.asset"),
-            F.col("decoded._contract")
+            F.col("decoded.asset")
         ).alias("reserve"),
         F.coalesce(
             F.col("decoded.user"),
@@ -354,10 +360,10 @@ def shape_repay(df: DataFrame) -> DataFrame:
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),  
 
+        F.col("decoded._contract").alias("project_contract"),
         F.coalesce(
             F.col("decoded.reserve"),
-            F.col("decoded.asset"),
-            F.col("decoded._contract")
+            F.col("decoded.asset")
         ).alias("reserve"),
         F.coalesce(
             F.col("decoded.user"),
@@ -399,6 +405,7 @@ def shape_liquidation(df: DataFrame) -> DataFrame:
         F.col("decoded._version").alias("protocol_version"),
         F.col("date"),  
 
+        F.col("decoded._contract").alias("project_contract"),
         F.coalesce(
             F.col("decoded.collateral_asset"),
             F.col("decoded.collateral"),
@@ -409,8 +416,7 @@ def shape_liquidation(df: DataFrame) -> DataFrame:
         F.coalesce(
             F.col("decoded.debt_asset"),
             F.col("decoded.reserve"),
-            F.col("decoded.asset_borrow"),
-            F.col("decoded._contract")
+            F.col("decoded.asset_borrow")
         ).alias("debt_asset"),
         F.coalesce(
             F.col("decoded.user"),
