@@ -1,6 +1,6 @@
 """
-aave_spark_job.py
-=================
+spark_job.py
+
 Batch Spark job that:
   1. Reads raw Ethereum event logs from the AWS public blockchain S3 bucket
   2. Filters to Aave V1/V2/V3 contracts and known topic0s
