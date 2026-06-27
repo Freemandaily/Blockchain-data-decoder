@@ -1,12 +1,9 @@
 [project]
-name = "decode-series"
+name = "protocol-decode"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "PySpark job for decoding EVM logs"
 requires-python = ">=3.12"
 dependencies = [
-    "boto3>=1.43.14",
     "eth-abi>=5.2.0",
     "pyspark>=4.1.2",
-    "web3>=7.16.0",
 ]

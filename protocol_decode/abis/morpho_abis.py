@@ -1,4 +1,9 @@
+import logging
 from web3 import Web3
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def _topic0(sig: str) -> str:
     return "0x" + Web3.keccak(text=sig).hex()
@@ -115,8 +120,8 @@ DECODER_MAP: dict[tuple[str, str], dict] = {
 
 # quick sanity print when run directly   
 if __name__ == "__main__":
-    print(f"{'Contract':<46} {'Event':<20} {'Version':<8} {'topic0':<4}")
-    print("-" * 130)
+    logger.info(f"{'Contract':<46} {'Event':<20} {'Version':<8} {'topic0':<4}")
+    logger.info("-" * 130)
     for (contract, t0), abi in sorted(DECODER_MAP.items()):
-        print(f"{contract:<46} {abi['event']:<20} {abi['version']:<8} {t0}")
-    print(f"\nTotal entries: {len(DECODER_MAP)}")
+        logger.info(f"{contract:<46} {abi['event']:<20} {abi['version']:<8} {t0}")
+    logger.info(f"\nTotal entries: {len(DECODER_MAP)}")
