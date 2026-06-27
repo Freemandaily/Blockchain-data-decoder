@@ -26,13 +26,13 @@ from typing import Iterator
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import MapType, StringType
+from pyspark.sql.types import MapType, StringType, StructType, StructField, BooleanType, ArrayType
 
 #  project modules 
-from aave_abis import CONTRACT_REGISTRY as AAVE_REGISTRY, DECODER_MAP as AAVE_DECODER_MAP
-from compound_abis import CONTRACT_REGISTRY as COMPOUND_REGISTRY, DECODER_MAP as COMPOUND_DECODER_MAP
-from morpho_abis import CONTRACT_REGISTRY as MORPHO_REGISTRY, DECODER_MAP as MORPHO_DECODER_MAP
-from decoder import decode_log
+from abis.aave_abis import CONTRACT_REGISTRY as AAVE_REGISTRY, DECODER_MAP as AAVE_DECODER_MAP
+from abis.compound_abis import CONTRACT_REGISTRY as COMPOUND_REGISTRY, DECODER_MAP as COMPOUND_DECODER_MAP
+from abis.morpho_abis import CONTRACT_REGISTRY as MORPHO_REGISTRY, DECODER_MAP as MORPHO_DECODER_MAP
+from decode.decoder import decode_log
 
 CONTRACT_REGISTRY = {**AAVE_REGISTRY, **COMPOUND_REGISTRY, **MORPHO_REGISTRY}
 DECODER_MAP = {**AAVE_DECODER_MAP, **COMPOUND_DECODER_MAP, **MORPHO_DECODER_MAP}
@@ -45,97 +45,26 @@ logging.basicConfig(
 )
 
 
-# Source
-S3_SOURCE   = "s3a://aws-public-blockchain/v1.0/eth/logs"
-S3_REGION   = "us-east-2"
+from config.config import get_spark, S3_SOURCE, S3_OUTPUT
 
-# Sink — S3
-S3_OUTPUT   = "s3a://money-market/decoded" 
-
-# All contract addresses (lowercase) — used for early filter
+# All contract addresses (lowercase) used for early filter
 ALL_CONTRACTS = {addr.lower() for addr in CONTRACT_REGISTRY.keys()}
 
 # All known topic0s — used for early filter
 ALL_TOPIC0S = list({abi["topic0"].lower() for abi in DECODER_MAP.values()})
 
-def get_spark(app_name: str,s3_raw_bucket='money-market') -> SparkSession:
-    builder = (
-        SparkSession.builder
-        .appName(app_name)
-
-        #  Anonymous credentials for public source bucket     
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint",         f"s3.{S3_REGION}.amazonaws.com")
-        .config("spark.hadoop.fs.s3a.path.style.access", "false")
-        .config("spark.hadoop.fs.s3a.impl",               "org.apache.hadoop.fs.s3a.S3AFileSystem")
-
-        #  S3 performance 
-        .config("spark.hadoop.fs.s3a.connection.maximum",           "200")
-        .config("spark.hadoop.fs.s3a.fast.upload",                  "true")
-        .config("spark.hadoop.fs.s3a.block.size",                   "134217728")
-        .config("spark.hadoop.fs.s3a.multipart.size",               "134217728")
-        .config("spark.hadoop.fs.s3a.connection.timeout",           "200000")
-        .config("spark.hadoop.fs.s3a.connection.establish.timeout", "15000")
-
-        .config("spark.sql.parquet.enableVectorizedReader",      "true")
-        .config("spark.sql.parquet.mergeSchema",                 "false")
-        .config("spark.sql.adaptive.enabled",                    "true")
-        .config("spark.sql.adaptive.skewJoin.enabled",           "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.sql.shuffle.partitions",                  "400")
-        .config("spark.sql.ansi.enabled",                        "false")
-
-        .config("spark.driver.memory",        "4g")
-        .config("spark.executor.memory",      "4g")
-        .config("spark.driver.maxResultSize", "2g")
-
-        .config(
-            "spark.jars.packages",
-            "org.apache.hadoop:hadoop-aws:3.4.1,org.postgresql:postgresql:42.7.3",
-        )
-    )
-
-    spark = builder.getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
-
-    # auto-detect local vs EMR
-    is_local = os.getenv("EMR_RELEASE_LABEL") is None
-    log.info("Environment: %s", "LOCAL" if is_local else "EMR")
-
-
-    if is_local:
-        aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
-        aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-
-        if not aws_access_key or not aws_secret_key:
-            log.error(
-                "AWS credentials not found. "
-                "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
-            )
-            sys.exit(1)
-
-        log.info("Local mode: injecting per-bucket credentials for s3a://%s", s3_raw_bucket)
-
-        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
-        hadoop_conf.set(
-            f"fs.s3a.bucket.{s3_raw_bucket}.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-        )
-        hadoop_conf.set(f"fs.s3a.bucket.{s3_raw_bucket}.access.key", aws_access_key)
-        hadoop_conf.set(f"fs.s3a.bucket.{s3_raw_bucket}.secret.key", aws_secret_key)
-        log.info("Per-bucket credentials injected ✓")
-
-    log.info("SparkSession ready | version=%s", spark.version)
-    return spark
+DECODE_RESULT_SCHEMA = StructType([
+    StructField("success", BooleanType(), False),
+    StructField("data", MapType(StringType(), StringType()), True),
+    StructField("error", StringType(), True),
+    StructField("raw_topics", ArrayType(StringType()), True),
+    StructField("raw_data", StringType(), True)
+])
 
 def _decode_udf_fn(address: str, topics: list, data: str):
     """
     Thin wrapper around decode_log for the Spark UDF.
-    Returns MapType(String, String) — all values stringified.
-    The caller casts individual fields when extracting columns.
+    Returns dictionary conforming to DECODE_RESULT_SCHEMA.
     """
     try:
         result = decode_log({
@@ -144,14 +73,32 @@ def _decode_udf_fn(address: str, topics: list, data: str):
             "data":    data or "0x",
         })
         if result is None:
-            return None
-        return {k: str(v) for k, v in result.items()}
+            return {
+                "success": False,
+                "data": None,
+                "error": "No matching ABI or decode_log returned None",
+                "raw_topics": topics,
+                "raw_data": data
+            }
+        return {
+            "success": True, 
+            "data": {k: str(v) for k, v in result.items()}, 
+            "error": None,
+            "raw_topics": None,
+            "raw_data": None
+        }
     except Exception as exc:  
         log.error("UDF error addr=%s exc=%s", address, exc)
-        return None
+        return {
+            "success": False,
+            "data": None,
+            "error": str(exc),
+            "raw_topics": topics,
+            "raw_data": data
+        }
 
 
-DECODE_UDF = F.udf(_decode_udf_fn, MapType(StringType(), StringType()))
+DECODE_UDF = F.udf(_decode_udf_fn, DECODE_RESULT_SCHEMA)
 
 
 def read_raw_logs(spark: SparkSession, start_date: date, end_date: date) -> DataFrame:
@@ -205,252 +152,22 @@ def filter_logs(df: DataFrame) -> DataFrame:
 
 def decode_logs(df: DataFrame) -> DataFrame:
     """
-    Apply the decode UDF and explode the result map into a
-    'decoded' struct column. Rows that fail to decode are dropped.
+    Apply the decode UDF. The result is a struct with success/data/error.
     """
     return (
         df
         .withColumn(
-            "decoded",
+            "decode_result",
             DECODE_UDF(
                 F.lower(F.col("address")),
                 F.col("topics"),
                 F.col("data"),
             )
         )
-        .filter(F.col("decoded").isNotNull())
     )
 
 
-def shape_deposit(df: DataFrame) -> DataFrame:
-    """
-    Unified Deposit schema across Aave and Compound.
-    """
-    return df.filter(F.col("decoded._event").isin("Deposit", "Mint", "Supply")).select(
-        F.col("block_number").cast("bigint"),
-        F.col("block_timestamp").cast("timestamp"),
-        F.col("transaction_hash"),
-        F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
-        F.col("decoded._version").alias("protocol_version"),
-        F.col("date"),   
-
-        F.col("decoded._contract").alias("project_contract"),
-        F.col("decoded.reserve").alias("reserve"),
-        F.coalesce(
-            F.col("decoded.user"),
-            F.col("decoded.minter"),
-            F.col("decoded.from"),
-            F.col("decoded.sender")
-        ).alias("user"),
-        F.coalesce(
-            F.col("decoded.onBehalfOf"),
-            F.col("decoded.dst"),
-            F.col("decoded.receiver")
-        ).alias("on_behalf_of"),
-        F.coalesce(
-            F.col("decoded.amount"),
-            F.col("decoded.mint_amount"),
-            F.col("decoded.assets")
-        ).cast("decimal(38,0)").alias("amount"),
-        F.col("decoded.mint_tokens").cast("decimal(38,0)").alias("mint_tokens"), # Compound V2
-        F.col("decoded.referral").cast("int").alias("referral"),
-        F.col("decoded.referralCode").cast("int").alias("referral_code"), # v3
-        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
-    )
-
-
-def shape_withdraw(df: DataFrame) -> DataFrame:
-    """
-    Unified Withdraw schema across Aave and Compound.
-    """
-    return df.filter(F.col("decoded._event").isin("Withdraw", "Redeem")).select(
-        F.col("block_number").cast("bigint"),
-        F.col("block_timestamp").cast("timestamp"),
-        F.col("transaction_hash"),
-        F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
-        F.col("decoded._version").alias("protocol_version"),
-        F.col("date"),   
-
-        F.col("decoded._contract").alias("project_contract"),
-        F.col("decoded.reserve").alias("reserve"),
-        F.coalesce(
-            F.col("decoded.user"),
-            F.col("decoded.redeemer"),
-            F.col("decoded.src"),
-            F.col("decoded.caller")
-        ).alias("user"),
-        F.coalesce(
-            F.col("decoded.to"),
-            F.col("decoded.user"),
-            F.col("decoded.redeemer"),
-            F.col("decoded.src"),
-            F.col("decoded.reciever")
-        ).alias("to"),
-        F.coalesce(
-            F.col("decoded.amount"),
-            F.col("decoded.redeem_amount"),
-            F.col("decoded.assets")
-        ).cast("decimal(38,0)").alias("amount"),
-        F.col("decoded.redeem_tokens").cast("decimal(38,0)").alias("redeem_tokens"), # Compound V2
-        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
-    )
-
-
-def shape_borrow(df: DataFrame) -> DataFrame:
-    """
-    Unified Borrow schema across Aave and Compound.
-    """
-    return df.filter(F.col("decoded._event") == "Borrow").select(
-        F.col("block_number").cast("bigint"),
-        F.col("block_timestamp").cast("timestamp"),
-        F.col("transaction_hash"),
-        F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
-        F.col("decoded._version").alias("protocol_version"),
-        F.col("date"),   
-
-        F.col("decoded._contract").alias("project_contract"),
-        F.coalesce(
-            F.col("decoded.reserve"),
-            F.col("decoded.asset")
-        ).alias("reserve"),
-        F.coalesce(
-            F.col("decoded.user"),
-            F.col("decoded.borrower"),
-            F.col("decoded.account"),
-            F.col("decoded.sender")
-        ).alias("user"),
-        F.coalesce(
-            F.col("decoded.on_behalf_of"),
-            F.col("decoded.onBehalfOf"),
-            F.col("decoded.receiver")
-        ).alias("on_behalf_of"),
-        F.coalesce(
-            F.col("decoded.amount"),
-            F.col("decoded.borrow_amount"),
-            F.col("decoded.eth")
-        ).cast("decimal(38,0)").alias("amount"),
-        F.col("decoded.borrow_rate_mode").cast("int").alias("borrow_rate_mode"),
-        F.col("decoded.interest_rate_mode").cast("int").alias("interest_rate_mode"),  # V3
-        F.col("decoded.borrow_rate").cast("decimal(38,0)").alias("borrow_rate"),
-        F.col("decoded.origination_fee").cast("decimal(38,0)").alias("origination_fee"),            # V1
-        F.col("decoded.borrow_balance_increase").cast("decimal(38,0)").alias("borrow_balance_increase"),  # V1
-        F.col("decoded.startingBalance").cast("decimal(38,0)").alias("starting_balance"), # Compound V1
-        F.col("decoded.borrowAmountWithFee").cast("decimal(38,0)").alias("borrow_amount_with_fee"), # Compound V1
-        F.col("decoded.newBalance").cast("decimal(38,0)").alias("new_balance"), # Compound V1
-        F.col("decoded.account_borrows").cast("decimal(38,0)").alias("account_borrows"), # Compound V2
-        F.col("decoded.total_borrows").cast("decimal(38,0)").alias("total_borrows"), # Compound V2
-        F.col("decoded.referral").cast("int").alias("referral_code"),
-        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
-    )
-
-
-def shape_repay(df: DataFrame) -> DataFrame:
-    """
-    Unified Repay schema across Aave and Compound.
-    """
-    return df.filter(F.col("decoded._event").isin("Repay", "RepayBorrow")).select(
-        F.col("block_number").cast("bigint"),
-        F.col("block_timestamp").cast("timestamp"),
-        F.col("transaction_hash"),
-        F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
-        F.col("decoded._version").alias("protocol_version"),
-        F.col("date"),  
-
-        F.col("decoded._contract").alias("project_contract"),
-        F.coalesce(
-            F.col("decoded.reserve"),
-            F.col("decoded.asset")
-        ).alias("reserve"),
-        F.coalesce(
-            F.col("decoded.user"),
-            F.col("decoded.borrower"),
-            F.col("decoded.account"),
-            F.col("decoded.dst")
-        ).alias("user"),
-        F.coalesce(
-            F.col("decoded.repayer"),
-            F.col("decoded.payer"),
-            F.col("decoded.from")
-        ).alias("repayer"),
-        F.coalesce(
-            F.col("decoded.amount"),
-            F.col("decoded.repay_amount")
-        ).cast("decimal(38,0)").alias("amount"),
-        F.col("decoded.amount_minus_fees").cast("decimal(38,0)").alias("amount_minus_fees"),  # V1
-        F.col("decoded.fees").cast("decimal(38,0)").alias("fees"),                            # V1
-        F.col("decoded.borrow_balance_increase").cast("decimal(38,0)").alias("borrow_balance_increase"),  # V1
-        F.col("decoded.startingBalance").cast("decimal(38,0)").alias("starting_balance"), # Compound V1
-        F.col("decoded.newBalance").cast("decimal(38,0)").alias("new_balance"), # Compound V1
-        F.col("decoded.account_borrows").cast("decimal(38,0)").alias("account_borrows"), # Compound V2
-        F.col("decoded.total_borrows").cast("decimal(38,0)").alias("total_borrows"), # Compound V2
-        F.col("decoded.use_a_tokens").cast("boolean").alias("use_a_tokens"),  # V3
-        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),   # V1
-    )
-
-
-def shape_liquidation(df: DataFrame) -> DataFrame:
-    """
-    Unified Liquidation schema across Aave and Compound.
-    """
-    return df.filter(F.col("decoded._event").isin("LiquidationCall", "LiquidateBorrow", "AbsorbCollateral", "AbsorbDebt")).select(
-        F.col("block_number").cast("bigint"),
-        F.col("block_timestamp").cast("timestamp"),
-        F.col("transaction_hash"),
-        F.col("log_index").cast("int"),
-        F.coalesce(F.col("decoded._protocol"), F.lit("aave")).alias("protocol"),
-        F.col("decoded._version").alias("protocol_version"),
-        F.col("date"),  
-
-        F.col("decoded._contract").alias("project_contract"),
-        F.coalesce(
-            F.col("decoded.collateral_asset"),
-            F.col("decoded.collateral"),
-            F.col("decoded.assetCollateral"),
-            F.col("decoded.c_token_collateral"),
-            F.col("decoded.asset")
-        ).alias("collateral_asset"),
-        F.coalesce(
-            F.col("decoded.debt_asset"),
-            F.col("decoded.reserve"),
-            F.col("decoded.asset_borrow")
-        ).alias("debt_asset"),
-        F.coalesce(
-            F.col("decoded.user"),
-            F.col("decoded.target_account"),
-            F.col("decoded.borrower")
-        ).alias("user"),
-        F.coalesce(
-            F.col("decoded.debt_to_cover"),
-            F.col("decoded.purchase_amount"),
-            F.col("decoded.amountRepaid"),
-            F.col("decoded.repay_amount"),
-            F.col("decoded.base_paid_out")
-        ).cast("decimal(38,0)").alias("debt_to_cover"),
-        F.coalesce(
-            F.col("decoded.liquidated_collateral_amount"),
-            F.col("decoded.amountSeized"),
-            F.col("decoded.seize_tokens"),
-            F.col("decoded.collateral_absorbed")
-        ).cast("decimal(38,0)").alias("liquidated_collateral_amount"),
-        F.col("decoded.accrued_borrow_interest").cast("decimal(38,0)").alias("accrued_borrow_interest"),  # V1
-        F.coalesce(
-            F.col("decoded.liquidator"),
-            F.col("decoded.absorber")
-        ).alias("liquidator"),
-        F.col("decoded.receive_a_token").cast("boolean").alias("receive_a_token"),
-        F.col("decoded.borrowBalanceBefore").cast("decimal(38,0)").alias("borrow_balance_before"), # Compound V1
-        F.col("decoded.borrowBalanceAccumulated").cast("decimal(38,0)").alias("borrow_balance_accumulated"), # Compound V1
-        F.col("decoded.borrowBalanceAfter").cast("decimal(38,0)").alias("borrow_balance_after"), # Compound V1
-        F.col("decoded.collateralBalanceBefore").cast("decimal(38,0)").alias("collateral_balance_before"), # Compound V1
-        F.col("decoded.collateralBalanceAccumulated").cast("decimal(38,0)").alias("collateral_balance_accumulated"), # Compound V1
-        F.col("decoded.collateralBalanceAfter").cast("decimal(38,0)").alias("collateral_balance_after"), # Compound V1
-        F.col("decoded.usd_value").cast("decimal(38,0)").alias("usd_value"), # Compound V3
-        F.col("decoded.timestamp").cast("bigint").alias("chain_timestamp"),  # V1
-    )
+from shapers.shapers import shape_deposit, shape_withdraw, shape_borrow, shape_repay, shape_liquidation
 
 
 def write_s3(df: DataFrame, event_name: str) -> None:
@@ -475,9 +192,36 @@ def run(start_date: date, end_date: date, sink: str) -> None:
 
     raw      = read_raw_logs(spark, start_date, end_date)
     filtered = filter_logs(raw)
-    decoded  = decode_logs(filtered).cache()
+    decoded_raw = decode_logs(filtered).cache()
 
-    log.info("Decoded row count: %d", decoded.count())
+    # Good rows 
+    decoded = (
+        decoded_raw.filter(F.col("decode_result.success") == True)
+        .withColumn("decoded", F.col("decode_result.data"))
+    ).cache()
+    
+    # Bad rows 
+    dead_letter_df = (
+        decoded_raw.filter(F.col("decode_result.success") == False)
+        .select(
+            F.col("block_number"),
+            F.col("block_timestamp"),
+            F.col("transaction_hash"),
+            F.col("log_index"),
+            F.col("date"),
+            F.col("address"),
+            F.col("decode_result.error").alias("error"),
+            F.col("decode_result.raw_topics").alias("raw_topics"),
+            F.col("decode_result.raw_data").alias("raw_data")
+        )
+    )
+    
+    dead_letter_count = dead_letter_df.count()
+    if dead_letter_count > 0:
+        log.warning("Found %d dead-letter rows. Writing to dead_letter partition.", dead_letter_count)
+        write_s3(dead_letter_df, "dead_letter")
+
+    log.info("Successfully decoded row count: %d", decoded.count())
     event_shapers = {
         "Borrow":          shape_borrow,
         "Repay":           shape_repay,
@@ -490,7 +234,6 @@ def run(start_date: date, end_date: date, sink: str) -> None:
     for event_name, shaper in event_shapers.items():
         log.info("Processing event: %s", event_name)
         event_df = shaper(decoded)
-        print(event_df.printSchema())
 
         row_count = event_df.count()
         log.info("  rows: %d", row_count)
@@ -504,6 +247,7 @@ def run(start_date: date, end_date: date, sink: str) -> None:
 
 
     decoded.unpersist()
+    decoded_raw.unpersist()
     spark.stop()
     log.info("Job complete.")
 

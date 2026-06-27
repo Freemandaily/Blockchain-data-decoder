@@ -10,14 +10,14 @@ This project implements a **generalized money-market decoder** that supports mul
 
 The pipeline is split into separate, highly decoupled modules:
 
-### 1. Registry & Schema Layers (`aave_abis.py` & `compound_abis.py`)
+### 1. Registry & Schema Layers (`abis/`)
 Acts as the **Protocol Registry and Schema definition layer**.
-* Stores event signatures, schemas, and `topic0` hashes for their respective protocols.
+* Stores event signatures, schemas, and `topic0` hashes for their respective protocols (`aave_abis.py`, `compound_abis.py`, `morpho_abis.py`).
 * Maps lowercase contract addresses to their respective event decoders to easily route log parsing.
 * Dynamically hashes signatures using `web3` (or supports pre-computed values for performance).
 * Identifies each event definition with a `protocol` attribute (e.g., `"aave"`, `"compound"`).
 
-### 2. Low-Level Log Decoder (`decoder.py`)
+### 2. Low-Level Log Decoder (`decode/decoder.py`)
 Implements **low-level EVM log decoding logic**.
 * Imports registries from all registered protocols and combines their registries and `DECODER_MAP` lookups into a unified registry.
 * Decodes indexed parameters from `topics` slots.
@@ -25,12 +25,12 @@ Implements **low-level EVM log decoding logic**.
 * Dynamically injects metadata (such as `_protocol`, `_version`, and `_contract`) into decoded payloads.
 * Exposes a unified `decode_log` function that functions in isolation or inside a PySpark worker environment.
 
-### 3. PySpark ETL Engine (`spark_job.py`)
+### 3. PySpark ETL Engine (`spark_job.py`, `config/`, `shapers/`)
 The **ETL engine and data shaper**.
-* Connects to public Ethereum log parquet datasets on AWS S3 (`s3a://aws-public-blockchain/v1.0/eth/logs`).
+* Connects to public Ethereum log parquet datasets on AWS S3 using configurations from `config.py`.
 * Combines the contract addresses and topic0s of all protocols into a single, broadcast-friendly PySpark filter to perform extremely fast, early filtering without shuffles.
-* Runs the decoding UDF concurrently across worker nodes.
-* Shapes and aligns disparate protocol version schemas (V1/V2/V3) and protocol families (Aave vs. Compound) into unified event schemas using Spark `coalesce` expressions.
+* Runs the decoding UDF concurrently across worker nodes, capturing failures via a robust **dead-letter pattern**.
+* Transforms and aligns disparate protocol version schemas into unified event schemas (Deposit, Borrow, Repay, etc.) via dedicated modules in `shapers.py`.
 * Outputs optimized Snappy-compressed, date-partitioned Parquet files back to S3.
 
 ---
@@ -63,6 +63,7 @@ uv sync
 ### Running Locally
 To test the pipeline locally on a subset of dates:
 ```bash
+cd protocol_decode
 uv run python spark_job.py \
   --start-date 2024-01-01 \
   --end-date 2024-01-02 \
@@ -75,7 +76,8 @@ uv run python spark_job.py \
 ### Running Smoke Tests
 To run isolated decoding test cases against mock Aave and Compound event payloads:
 ```bash
-uv run python decoder.py
+cd protocol_decode
+uv run python decode/decoder.py
 ```
 
 ---
@@ -85,17 +87,20 @@ uv run python decoder.py
 To process massive date ranges at scale, submit the job to an AWS EMR cluster.
 
 ### 1. Prepare and Upload script dependencies to S3
-Ensure all Python files and dependencies are uploaded to your EMR-accessible script bucket:
+Since the project is modularized, use the `Makefile` inside `protocol_decode/` to zip your dependencies:
 ```bash
-aws s3 cp aave_abis.py s3://money-market/script/aave_abis.py
-aws s3 cp compound_abis.py s3://money-market/script/compound_abis.py
-aws s3 cp decoder.py s3://money-market/script/decoder.py
+cd protocol_decode
+make build
+```
+Ensure all Python files and the newly built `deps.zip` are uploaded to your EMR-accessible script bucket:
+```bash
+aws s3 cp deps.zip s3://money-market/script/deps.zip
 aws s3 cp spark_job.py s3://money-market/script/spark_job.py
-aws s3 cp bootstrap.sh s3://money-market/script/bootstrap.sh
+aws s3 cp ../bootstrap.sh s3://money-market/script/bootstrap.sh
 ```
 
 ### 2. Submit Step to EMR Cluster
-Run this AWS CLI command to add the decoding job step to your active EMR cluster (replace `j-1T10U9FY3RX2Q` with your actual Cluster ID):
+Run this AWS CLI command to add the decoding job step to your active EMR cluster (replace `j-1T10U9FY3RX2Q` with your actual Cluster ID). Note that we pass `deps.zip` to `--py-files`:
 
 ```bash
 aws emr add-steps \
@@ -109,7 +114,7 @@ aws emr add-steps \
         "Args": [
           "spark-submit",
           "--deploy-mode", "cluster",
-          "--py-files", "s3://money-market/script/aave_abis.py,s3://money-market/script/compound_abis.py,s3://money-market/script/decoder.py",
+          "--py-files", "s3://money-market/script/deps.zip",
           "--conf", "spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3",
           "s3://money-market/script/spark_job.py",
           "--env", "emr",
